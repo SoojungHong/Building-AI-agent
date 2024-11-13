@@ -1,0 +1,54 @@
+Creating a prompt that encourages a model to use a chain of thought reasoning process involves explicitly asking it to break down its answer into a series of logical steps. Here is an example of a Chain of Thought (CoT) prompt:
+
+Example 1: Simple Arithmetic Chain of Thought
+Prompt: Q: If there are 3 apples and you buy 4 more apples, how many apples do you have in total? Explain step by step.
+
+Expected Chain of Thought Answer:
+
+Start with the initial number of apples: 3 apples.
+Add the number of apples you bought: 3 + 4 = 7 apples.
+Therefore, the total number of apples is 7.
+Example 2: Reasoning with Real-World Information
+Prompt: Q: Tom has 8 marbles, and he gives 3 marbles to Jerry. Then, Tom buys 5 more marbles. How many marbles does Tom have now? Explain step by step.
+
+Expected Chain of Thought Answer:
+
+Tom initially has 8 marbles.
+Tom gives 3 marbles to Jerry: 8 - 3 = 5 marbles.
+Tom then buys 5 more marbles: 5 + 5 = 10 marbles.
+Therefore, Tom now has 10 marbles.
+Example 3: Complex Logical Reasoning
+Prompt: Q: If a train leaves Station A at 3 PM traveling at 60 miles per hour and another train leaves Station B at 4 PM traveling at 90 miles per hour towards Station A, when will the two trains meet if the distance between the stations is 300 miles? Explain your reasoning step by step.
+
+Expected Chain of Thought Answer:
+
+Let’s calculate the distance traveled by the first train in 1 hour: 60 miles per hour × 1 hour = 60 miles.
+The remaining distance between the two trains when the second train starts is: 300 miles - 60 miles = 240 miles.
+The combined speed of the two trains is: 60 miles per hour + 90 miles per hour = 150 miles per hour.
+Time taken for the trains to meet after the second train starts is: 240 miles ÷ 150 miles per hour = 1.6 hours.
+1.6 hours is equivalent to 1 hour and 36 minutes.
+Since the second train starts at 4 PM, they will meet at 5:36 PM.
+Example 4: General Knowledge and Reasoning
+Prompt: Q: Why do we have seasons on Earth? Explain step by step.
+
+Expected Chain of Thought Answer:
+
+The Earth is tilted on its axis by about 23.5 degrees relative to its orbit around the Sun.
+As the Earth orbits the Sun, this tilt causes different parts of the Earth to receive varying amounts of sunlight at different times of the year.
+When the Northern Hemisphere is tilted towards the Sun, it experiences summer because it receives more direct sunlight.
+Conversely, when the Northern Hemisphere is tilted away from the Sun, it experiences winter because it receives less direct sunlight.
+The Southern Hemisphere experiences the opposite seasons at the same time.
+Therefore, the tilt of the Earth's axis and its orbit around the Sun are the reasons why we have seasons.
+Structuring a Chain of Thought Prompt
+When designing your own chain of thought prompts, follow these principles:
+
+Ask for Step-by-Step Reasoning: Encourage the model to think systematically and explain each step.
+Provide Context: Ensure the model understands the background information or relevant constraints.
+Explicitly Mention a Chain of Thought Process: Use language like “Explain step by step” or “Reason through this systematically.”
+You can use these structures to guide the model's thinking for various types of questions, from simple arithmetic to complex reasoning tasks.
+
+
+
+
+
+
