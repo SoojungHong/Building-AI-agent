@@ -115,3 +115,195 @@ from faiss import IndexHNSWFlat
 dimension = 1536  # Depends on the embedding model
 index = IndexHNSWFlat(dimension, 32)  # 32 is the number of connections
 vector_store = FAISS(index, embeddings.embed_query, "your_faiss_store")
+
+
+"""
+To reduce the token size of input for your Retrieval Augmented Generation (RAG) system, you can trim retrieved documents or summarize them before passing them to the language model. This ensures that your prompt stays within the model’s token limits, speeds up inference, and reduces cost.
+
+Here’s how you can implement this using LangChain.
+
+1. Trimming Retrieved Documents
+Method: Restrict the number of tokens per retrieved document and prioritize the most relevant parts.
+
+Implementation:
+"""
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+
+# Initialize Text Splitter
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,  # Limit chunks to 500 characters
+    chunk_overlap=50  # Add overlap for better context continuity
+)
+
+# Trimming Function
+def trim_documents(documents, max_tokens=1500):
+    """Trim the retrieved documents to fit within max_tokens."""
+    trimmed_docs = []
+    token_count = 0
+
+    for doc in documents:
+        # Split document into smaller chunks
+        chunks = text_splitter.split_text(doc.page_content)
+
+        for chunk in chunks:
+            # Count tokens approximately (1 token ≈ 4 chars for English text)
+            chunk_tokens = len(chunk) // 4
+            if token_count + chunk_tokens <= max_tokens:
+                trimmed_docs.append(chunk)
+                token_count += chunk_tokens
+            else:
+                break  # Stop adding chunks if token limit is reached
+
+    return " ".join(trimmed_docs)
+
+# Usage in a Retrieval Chain
+retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+retrieved_docs = retriever.get_relevant_documents("Your query here")
+
+# Trim documents before passing to the LLM
+context = trim_documents(retrieved_docs)
+
+# Define Prompt
+prompt_template = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""
+    You are a helpful assistant. Based on the context provided below, answer the user's question.
+
+    Context: {context}
+
+    Question: {question}
+    Answer:
+    """
+)
+
+# Pass to RetrievalQA Chain
+llm = ChatOpenAI(model="gpt-4")
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=retriever,
+    chain_type="stuff",
+    chain_type_kwargs={"prompt": prompt_template},
+    return_source_documents=False
+)
+
+response = qa_chain.run({"context": context, "question": "Your query here"})
+print(response)
+
+
+"""
+2. Summarizing Retrieved Documents with a Summary Chain
+Method: Use a summarization chain to condense each document into a shorter form before feeding it into the LLM.
+
+Implementation:
+"""
+
+from langchain.chains import LLMChain, TransformChain, SimpleSequentialChain
+from langchain.prompts import PromptTemplate
+
+# Define Summarization Prompt
+summary_prompt = PromptTemplate(
+    input_variables=["document"],
+    template="""
+    Summarize the following document concisely in one paragraph:
+    {document}
+    """
+)
+
+# Summarization Chain
+summary_chain = LLMChain(
+    llm=ChatOpenAI(model="gpt-3.5-turbo"),  # Use a smaller, faster model for summarization
+    prompt=summary_prompt
+)
+
+# Summarize Retrieved Documents
+def summarize_documents(retrieved_docs):
+    summaries = []
+    for doc in retrieved_docs:
+        summary = summary_chain.run({"document": doc.page_content})
+        summaries.append(summary)
+    return " ".join(summaries)  # Combine all summaries into a single context
+
+# Retrieve and Summarize Documents
+retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+retrieved_docs = retriever.get_relevant_documents("Your query here")
+summarized_context = summarize_documents(retrieved_docs)
+
+# Define Prompt for QA
+qa_prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""
+    You are a helpful assistant. Based on the summarized context provided below, answer the user's question.
+
+    Summarized Context: {context}
+
+    Question: {question}
+    Answer:
+    """
+)
+
+# QA Chain with Summarized Context
+qa_chain = RetrievalQA.from_chain_type(
+    llm=ChatOpenAI(model="gpt-4"),
+    retriever=retriever,
+    chain_type="stuff",
+    chain_type_kwargs={"prompt": qa_prompt},
+    return_source_documents=False
+)
+
+response = qa_chain.run({"context": summarized_context, "question": "Your query here"})
+print(response)
+
+"""
+3. Combining Both Trimming and Summarization
+You can combine trimming and summarization for more efficient preprocessing:
+
+Trim documents first to limit the number of tokens.
+Summarize the trimmed chunks to condense information further.
+"""
+def preprocess_documents(retrieved_docs, max_tokens=1500):
+    """Trim and summarize retrieved documents."""
+    # Step 1: Trim Documents
+    trimmed_context = trim_documents(retrieved_docs, max_tokens=max_tokens)
+
+    # Step 2: Summarize the Trimmed Context
+    summarized_context = summary_chain.run({"document": trimmed_context})
+    return summarized_context
+
+retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+retrieved_docs = retriever.get_relevant_documents("Your query here")
+
+# Preprocess documents
+final_context = preprocess_documents(retrieved_docs)
+
+# Define QA Prompt
+qa_prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""
+    You are a helpful assistant. Based on the condensed context provided below, answer the user's question.
+
+    Condensed Context: {context}
+
+    Question: {question}
+    Answer:
+    """
+)
+
+# QA Chain
+qa_chain = RetrievalQA.from_chain_type(
+    llm=ChatOpenAI(model="gpt-4"),
+    retriever=retriever,
+    chain_type="stuff",
+    chain_type_kwargs={"prompt": qa_prompt},
+    return_source_documents=False
+)
+
+response = qa_chain.run({"context": final_context, "question": "Your query here"})
+print(response)
+
+
+
