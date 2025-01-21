@@ -56,6 +56,15 @@ graph = Graph()
 # Add a node to the graph that calls the LLM with a vector store
 graph.add_node("node1", execute_llm_with_vector_store)
 
+def custom_node(prompt: str) -> str:
+    return f"Custom Node received: {prompt}"
+
+graph.add_node("custom_node", custom_node)
+
+response = graph.call_node("custom_node", "Hello, custom node!")
+print(response)
+
+
 # Example usage
 if __name__ == "__main__":
     # Call the node with a prompt
