@@ -1,0 +1,21 @@
+transaction_id,date,customer_name,product,category,region,quantity,unit_price,revenue
+1,2024-01-15,Acme Corp,Widget A,Electronics,North,100,25.50,2550.00
+2,2024-01-16,TechStart Inc,Gadget B,Electronics,West,50,45.00,2250.00
+3,2024-01-17,Global Solutions,Widget A,Electronics,East,75,25.50,1912.50
+4,2024-01-18,Acme Corp,Service Pro,Services,North,10,150.00,1500.00
+5,2024-01-20,MegaMart,Widget A,Electronics,South,200,25.50,5100.00
+6,2024-01-22,TechStart Inc,Gadget B,Electronics,West,30,45.00,1350.00
+7,2024-01-25,Local Biz,Service Pro,Services,East,5,150.00,750.00
+8,2024-02-01,Acme Corp,Widget A,Electronics,North,150,25.50,3825.00
+9,2024-02-03,Global Solutions,Premium Suite,Software,East,20,200.00,4000.00
+10,2024-02-05,MegaMart,Gadget B,Electronics,South,100,45.00,4500.00
+11,2024-02-08,TechStart Inc,Premium Suite,Software,West,15,200.00,3000.00
+12,2024-02-10,SmallCo,Service Pro,Services,North,8,150.00,1200.00
+13,2024-02-12,Acme Corp,Premium Suite,Software,North,25,200.00,5000.00
+14,2024-02-15,Global Solutions,Widget A,Electronics,East,90,25.50,2295.00
+15,2024-02-18,MegaMart,Gadget B,Electronics,South,120,45.00,5400.00
+16,2024-03-01,TechStart Inc,Widget A,Electronics,West,80,25.50,2040.00
+17,2024-03-05,Acme Corp,Service Pro,Services,North,12,150.00,1800.00
+18,2024-03-08,Local Biz,Premium Suite,Software,East,10,200.00,2000.00
+19,2024-03-12,MegaMart,Widget A,Electronics,South,180,25.50,4590.00
+20,2024-03-15,Global Solutions,Gadget B,Electronics,East,60,45.00,2700.00
