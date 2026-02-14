@@ -1,5 +1,18 @@
 """
 use MemorySaver without defining a custom state by leveraging the system message to dynamically inject context about the current client. 
+
+idea : per user (e.g., CA or RM's email), store the the latest entities -  client identifier, opportunity name 
+example : "myname@abc.com" :
+                    {
+                     "client" : abc, 
+                     "opportunity": 234
+                     } 
+
+workflow : 
+1. per user 
+2. detect the entities - client identifier, opportunity id, etc 
+3. when prompt has 'this', 'that', etc
+4. search the entity database
 """
 
 from langgraph.graph import MessagesState, StateGraph
@@ -37,12 +50,16 @@ def extract_client_from_messages(messages):
                 return client_key
     return None
 
+# ToDo : extract_entity_from_messages(messages) , run it parallel? 
+# instead of extract only client, extract entities given current user email 
+
 def chatbot_node(state: MessagesState):
     """Chatbot node that tracks entities through message history"""
     messages = state["messages"]
     
     # Extract current client from conversation history
     current_client = extract_client_from_messages(messages)
+    # ToDo : current_entity = extract_entity_from_messages(messages) 
     
     # Create dynamic system message with context
     system_content = f"""You are a helpful assistant with access to client information.
