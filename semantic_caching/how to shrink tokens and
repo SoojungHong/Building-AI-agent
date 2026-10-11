@@ -1,0 +1,279 @@
+Here’s how to implement both, with code you can drop into a LangGraph agent.
+
+5. Shrink tokens
+
+Output tokens are generated one at a time, so they cost roughly 10–50× more latency than input tokens. Cut output first, then input.
+
+5a. Cap and shape the output
+
+Set max_tokens for each model. Intermediate steps rarely need more than a few hundred tokens.
+
+python
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+
+router_llm  = ChatOpenAI(model="gpt-4.1-mini", max_tokens=50, temperature=0)
+worker_llm  = ChatOpenAI(model="gpt-4.1-mini", max_tokens=400)
+final_llm   = ChatAnthropic(model="claude-sonnet-4-5", max_tokens=1200)
+
+Use structured output for intermediate steps instead of prose. A JSON object with 3 fields is about 30 tokens. A “let me think about this…” paragraph is 300.
+
+python
+from pydantic import BaseModel, Field
+
+class Plan(BaseModel):
+    steps: list[str] = Field(description="Max 4 short steps, imperative, <12 words each")
+    needs_db: bool
+    needs_search: bool
+
+planner = worker_llm.with_structured_output(Plan)
+
+def plan_node(state):
+    plan = planner.invoke(state["messages"])
+    return {"plan": plan}
+
+Tell the model to be brief. It works surprisingly well:
+
+python
+SYSTEM = """You are a step in a pipeline. Output only what is asked.
+No preamble, no restating the question, no explanations unless requested."""
+
+Turn down reasoning on reasoning models. Keep it high only where it matters:
+
+python
+# OpenAI reasoning models
+fast_reasoner = ChatOpenAI(model="o4-mini", reasoning_effort="low")
+
+# Anthropic extended thinking: small budget, or off for intermediate steps
+final_llm = ChatAnthropic(
+    model="claude-sonnet-4-5",
+    max_tokens=3000,
+    thinking={"type": "enabled", "budget_tokens": 1024},
+)
+5b. Trim what goes in
+
+Trim message history before every LLM call. In a multi-step agent, state["messages"] grows with every tool result. By step 6 you can be sending 30k tokens.
+
+python
+from langchain_core.messages import trim_messages
+
+trimmer = trim_messages(
+    max_tokens=4000,
+    strategy="last",          # keep the most recent
+    token_counter=worker_llm, # or a fast approximate counter
+    include_system=True,      # always keep the system prompt
+    start_on="human",         # don't start mid tool-call pair
+)
+
+def agent_node(state):
+    msgs = trimmer.invoke(state["messages"])
+    response = worker_llm_with_tools.invoke(msgs)
+    return {"messages": [response]}
+
+If token_counter=llm is slow, use token_counter="approximate" if your version supports it, or a simple len(text) // 4 function.
+
+Truncate or summarize tool results before they hit the LLM. This is often the single biggest input saving. Raw API, HTML, and DB outputs are bloated.
+
+python
+import json
+from functools import wraps
+
+MAX_TOOL_CHARS = 3000
+
+def compact_output(fn):
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        result = await fn(*args, **kwargs)
+        text = result if isinstance(result, str) else json.dumps(result, default=str)
+        if len(text) > MAX_TOOL_CHARS:
+            text = text[:MAX_TOOL_CHARS] + f"\n...[truncated {len(text)-MAX_TOOL_CHARS} chars]"
+        return text
+    return wrapper
+
+@tool
+@compact_output
+async def search_orders(customer_id: str) -> list[dict]:
+    """Return recent orders for a customer."""
+    rows = await db.fetch(
+        "SELECT id, status, total, created_at FROM orders "   # only needed columns
+        "WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 10",
+        customer_id,
+    )
+    return [dict(r) for r in rows]
+
+Better than truncation: return only the fields the LLM needs. Drop IDs it never uses, nested metadata, and HTML.
+
+Summarize old turns instead of carrying them. For long sessions, keep a running summary in state:
+
+python
+from langchain_core.messages import RemoveMessage, SystemMessage
+
+def summarize_if_long(state):
+    msgs = state["messages"]
+    if len(msgs) < 12:
+        return {}
+    old, recent = msgs[:-6], msgs[-6:]
+    summary = small_llm.invoke(
+        [SystemMessage("Summarize the key facts and decisions in <150 words.")] + old
+    ).content
+    return {
+        "summary": summary,
+        "messages": [RemoveMessage(id=m.id) for m in old],
+    }
+
+def agent_node(state):
+    sys = SystemMessage(SYSTEM + f"\n\nConversation so far: {state.get('summary','')}")
+    return {"messages": [llm.invoke([sys] + state["messages"])]}
+
+Use prompt caching. Big, stable prefixes (system prompt, tool definitions, few-shot examples) can be cached by the provider. That cuts time-to-first-token noticeably on long prompts.
+
+OpenAI: automatic for prompts over 1024 tokens, as long as the prefix is identical. Put static content first and dynamic content (date, user data) at the end.
+Anthropic: mark the cache point explicitly:
+python
+from langchain_core.messages import SystemMessage
+
+system = SystemMessage(content=[
+    {"type": "text", "text": LONG_STATIC_INSTRUCTIONS,
+     "cache_control": {"type": "ephemeral"}},
+])
+
+A common mistake: putting datetime.now() or the user’s name at the top of the system prompt breaks the cache on every call.
+
+Check that it worked. Log token usage per node:
+
+python
+resp = llm.invoke(msgs)
+print(resp.usage_metadata)  # input_tokens, output_tokens, cache details
+6. Speed up tools
+6a. Find slow tools first
+python
+import time, logging
+from functools import wraps
+
+def timed(fn):
+    @wraps(fn)
+    async def wrapper(*a, **kw):
+        t = time.perf_counter()
+        try:
+            return await fn(*a, **kw)
+        finally:
+            logging.info(f"{fn.__name__} took {time.perf_counter()-t:.2f}s")
+    return wrapper
+
+LangSmith also shows this per tool span.
+
+6b. Make tools async and reuse clients
+
+Creating a new HTTP or DB client per call costs a TLS handshake each time, often 100–500 ms. Create clients once at startup:
+
+python
+import httpx, asyncpg
+
+http = httpx.AsyncClient(
+    timeout=httpx.Timeout(10.0, connect=3.0),
+    limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+)
+db_pool = None
+
+async def startup():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DSN, min_size=2, max_size=10)
+
+@tool
+async def get_weather(city: str) -> str:
+    """Current weather for a city."""
+    r = await http.get("https://api.example.com/weather", params={"q": city})
+    r.raise_for_status()
+    d = r.json()
+    return f"{d['temp']}°C, {d['condition']}"   # compact, not the full JSON
+
+Async tools matter because LangGraph’s ToolNode runs multiple tool calls concurrently. Sync tools that block the event loop serialize them. Also invoke the graph with await graph.ainvoke(...), not invoke.
+
+6c. Cache results
+
+Tool-level TTL cache, for repeated lookups within or across runs:
+
+python
+from cachetools import TTLCache
+import hashlib, json
+
+_cache = TTLCache(maxsize=1000, ttl=300)  # 5 min
+
+def cached(fn):
+    @wraps(fn)
+    async def wrapper(*a, **kw):
+        key = fn.__name__ + hashlib.md5(json.dumps([a, kw], sort_keys=True, default=str).encode()).hexdigest()
+        if key in _cache:
+            return _cache[key]
+        result = await fn(*a, **kw)
+        _cache[key] = result
+        return result
+    return wrapper
+
+Use Redis instead of TTLCache if you run several workers.
+
+LangGraph node cache. Recent LangGraph versions can cache an entire node’s output by its input:
+
+python
+from langgraph.types import CachePolicy
+from langgraph.cache.memory import InMemoryCache
+
+builder.add_node("retrieve", retrieve_node, cache_policy=CachePolicy(ttl=300))
+graph = builder.compile(cache=InMemoryCache())
+
+LLM response cache, for identical deterministic calls such as routing or classification:
+
+python
+from langchain_core.globals import set_llm_cache
+from langchain_community.cache import SQLiteCache  # or RedisCache
+set_llm_cache(SQLiteCache(database_path=".llm_cache.db"))
+
+Embedding cache, so you don’t re-embed the same query or document:
+
+python
+from langchain.embeddings import CacheBackedEmbeddings
+from langchain.storage import LocalFileStore
+
+embedder = CacheBackedEmbeddings.from_bytes_store(
+    base_embeddings, LocalFileStore("./emb_cache"),
+    namespace=base_embeddings.model, query_embedding_cache=True,
+)
+6d. Set timeouts and fail fast
+
+One slow API that hangs for 60s ruins everything. Set timeouts on tools and LLMs, and return a clean error so the agent moves on instead of retrying blindly.
+
+python
+llm = ChatOpenAI(model="gpt-4.1-mini", timeout=30, max_retries=1)
+
+@tool
+async def lookup(q: str) -> str:
+    """..."""
+    try:
+        return await asyncio.wait_for(_lookup(q), timeout=8)
+    except asyncio.TimeoutError:
+        return "ERROR: lookup timed out. Continue without this data."
+python
+from langgraph.prebuilt import ToolNode
+tool_node = ToolNode(tools, handle_tool_errors=True)  # errors go back as messages, not crashes
+
+Clear error messages like “Continue without this data” stop the agent from looping on the same failing call.
+
+6e. Tune retrieval (RAG)
+Lower k: 3–5 chunks instead of 10–20. Fewer chunks means faster search and far fewer input tokens.
+Use metadata filters (date, category, tenant) to narrow the search before vector search.
+Rethink reranking. A cross-encoder reranker adds 0.5–3s. Either drop it, or retrieve 20 and rerank to 4 with a fast reranker.
+Use a smaller embedding model for queries, such as a “small” or 384–768-dimension model, if quality holds.
+Keep the vector DB warm and close. Same region as your app, a persistent client, and an HNSW index rather than flat search for large collections.
+Avoid LLM-based query rewriting (multi-query, HyDE) unless it clearly helps. Each one is an extra LLM call.
+6f. Infrastructure
+Put the app, DB, vector store, and LLM endpoint in the same or nearby regions. From Zurich, EU endpoints usually help.
+Pick the checkpointer deliberately. MemorySaver is fastest. With Postgres or Redis, use a connection pool and don’t checkpoint huge state; keep big blobs out of state.
+Start the app with clients already initialized (warm start), not lazily on the first request.
+Rough impact
+Change	Typical saving
+Truncate tool outputs and trim history	20–40% per LLM call on later steps
+max_tokens plus structured intermediate outputs	Large, since it caps the slowest part
+Lower reasoning effort on intermediate steps	Often 2–5× on those calls
+Async tools plus shared clients	0.2–1s per tool call, more when parallel
+Caching	Near-zero time on repeats
+Timeouts plus clean errors	Removes the occasional 30–60s outlier
