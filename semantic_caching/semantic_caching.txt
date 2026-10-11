@@ -1,0 +1,208 @@
+Yes. It’s one of the most effective latency tricks: a cache hit returns in about 100–300 ms instead of 60–120s. It’s usually called a semantic cache or FAQ fast path. It only works well with a few safeguards, though, so here’s when to use it and how.
+
+When it’s a good idea
+
+Good fit:
+
+Many users ask the same things in different words (“how do I reset my password” / “forgot password”).
+Answers are stable: policies, product info, how-tos, documentation.
+Answers don’t depend on who is asking.
+
+Bad fit, or needs care:
+
+Personalized questions. “What’s my order status?” must never return another user’s cached answer.
+Time-sensitive questions. Prices, stock, news, “today”.
+Follow-up questions. “And what about the second one?” means nothing without the conversation history.
+Near-miss questions. “How do I cancel my subscription?” vs “How do I not cancel my subscription?” look similar to embeddings but mean the opposite. This is the main risk, and the similarity threshold is how you control it.
+Two ways to fill it
+Curated FAQ. You write or approve the question–answer pairs yourself. Safest, highest quality. Start here.
+Automatic cache. After the agent answers, you store the question and answer. Grows on its own, but can store wrong or personalized answers. Use only with filters, and preferably human review before entries go live.
+
+Many teams combine them: auto-log candidates, review the top ones weekly, promote good ones to the curated FAQ.
+
+How to build it
+Architecture
+user question
+   │
+   ▼
+[rewrite to standalone question]  ← only if there's chat history
+   │
+   ▼
+[FAQ lookup] ── similarity ≥ threshold ──► return cached answer (fast)
+   │
+   └── below threshold ──► full agent ──► (optionally) save as candidate
+1. Create the store
+
+Any vector store works (Chroma, PGVector, Qdrant, Redis). This example uses PGVector, but the code is nearly identical for the others.
+
+python
+from langchain_openai import OpenAIEmbeddings
+from langchain_postgres import PGVector
+from langchain_core.documents import Document
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+faq_store = PGVector(
+    embeddings=embeddings,
+    collection_name="faq_cache",
+    connection=DB_URL,
+    use_jsonb=True,
+)
+2. Add curated FAQs
+
+Embed the question, and store the answer in metadata. Users match against questions, not answers.
+
+python
+from datetime import datetime, timezone
+
+faqs = [
+    {
+        "question": "How do I reset my password?",
+        "answer": "Go to Settings → Security → Reset password. You'll get an email link valid for 30 minutes.",
+        "category": "account",
+    },
+    {
+        "question": "What are your support hours?",
+        "answer": "Support is available Monday–Friday, 8:00–18:00 CET.",
+        "category": "support",
+    },
+]
+
+docs = []
+for f in faqs:
+    docs.append(Document(
+        page_content=f["question"],
+        metadata={
+            "answer": f["answer"],
+            "category": f["category"],
+            "source": "curated",
+            "version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    ))
+
+faq_store.add_documents(docs, ids=[f"faq-{i}" for i in range(len(docs))])
+
+Tip: add 2–3 paraphrases per FAQ pointing to the same answer (“forgot my password”, “can’t log in, need new password”). This raises the hit rate much more than lowering the threshold, and it’s safer.
+
+3. Look it up with a strict threshold
+python
+SIMILARITY_THRESHOLD = 0.90   # tune this; start strict
+
+def faq_lookup(question: str):
+    results = faq_store.similarity_search_with_relevance_scores(question, k=1)
+    if not results:
+        return None
+    doc, score = results[0]
+    if score >= SIMILARITY_THRESHOLD:
+        return {"answer": doc.metadata["answer"], "score": score,
+                "matched": doc.page_content}
+    return None
+
+Score scales differ between vector stores and distance metrics. Some return a distance where lower means more similar. Check what yours returns with a few known matches and non-matches before choosing the threshold.
+
+4. Plug it into LangGraph as the first node
+python
+from typing import TypedDict, Annotated
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langchain_core.messages import AIMessage, HumanMessage
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+    standalone_q: str
+    faq_hit: bool
+
+def rewrite_node(state: State):
+    msgs = state["messages"]
+    last = msgs[-1].content
+    if len(msgs) == 1:                  # first message: no rewrite needed
+        return {"standalone_q": last}
+    q = small_llm.invoke(
+        "Rewrite the last user message as a standalone question. "
+        "Output only the question.\n\n"
+        + "\n".join(f"{m.type}: {m.content}" for m in msgs[-6:])
+    ).content
+    return {"standalone_q": q}
+
+def faq_node(state: State):
+    hit = faq_lookup(state["standalone_q"])
+    if hit:
+        return {"faq_hit": True, "messages": [AIMessage(hit["answer"])]}
+    return {"faq_hit": False}
+
+def route_after_faq(state: State):
+    return END if state["faq_hit"] else "agent"
+
+builder = StateGraph(State)
+builder.add_node("rewrite", rewrite_node)
+builder.add_node("faq", faq_node)
+builder.add_node("agent", agent_subgraph)   # your existing agent
+builder.add_edge(START, "rewrite")
+builder.add_edge("rewrite", "faq")
+builder.add_conditional_edges("faq", route_after_faq, ["agent", END])
+builder.add_edge("agent", END)
+graph = builder.compile()
+
+The rewrite step costs one fast small-model call, about 0.5–1s. Skip it when there’s no history, as shown above.
+
+5. Skip the cache for personal and time-sensitive questions
+
+A cheap keyword check avoids an extra LLM call:
+
+python
+import re
+
+SKIP_PATTERNS = re.compile(
+    r"\b(my|mine|I|me|order|account balance|today|now|latest|current|price)\b",
+    re.IGNORECASE,
+)
+
+def faq_node(state: State):
+    q = state["standalone_q"]
+    if SKIP_PATTERNS.search(q):
+        return {"faq_hit": False}
+    ...
+
+Tune the pattern for your domain. Alternatively, have the rewrite step also return a cacheable: bool via structured output, since it’s already an LLM call.
+
+6. Optional: auto-save candidates
+
+Don’t write straight into the live FAQ store. Save to a review table, or to the same store with "status": "pending" and filter it out at lookup time.
+
+python
+def save_candidate(question: str, answer: str, user_feedback: str | None):
+    if SKIP_PATTERNS.search(question):
+        return
+    faq_store.add_documents([Document(
+        page_content=question,
+        metadata={
+            "answer": answer,
+            "source": "auto",
+            "status": "pending",          # promote to "approved" after review
+            "feedback": user_feedback,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )])
+
+# lookup only approved or curated entries
+results = faq_store.similarity_search_with_relevance_scores(
+    question, k=1, filter={"status": {"$ne": "pending"}}
+)
+
+A thumbs-up from the user is a good signal for which candidates to promote.
+
+Keeping it correct over time
+Expiry. Store created_at and ignore or refresh entries older than N days for anything that can change.
+Invalidation. When a policy or product changes, delete or update entries by category or ID. Deterministic IDs like faq-password-reset make this easy.
+Logging. Log every hit with the score, matched question, and user question. Review low-score hits (0.90–0.93) regularly. That’s where wrong matches show up.
+Threshold tuning. Build a small test set of about 50 real questions labeled “should match X” or “should not match”, then pick the threshold that gives zero wrong matches. A miss only costs latency. A wrong match gives a wrong answer.
+Ready-made option
+
+LangChain has built-in semantic LLM caches (RedisSemanticCache, among others) that cache at the LLM-call level. They’re easy to set up, but they match on the full prompt, including system prompt and history. In a multi-step agent that rarely produces hits and gives you little control. The custom FAQ node above works better for agents because it short-circuits the whole graph with one lookup.
+
+Expected effect
+
+If 20–40% of your traffic is common questions, which is typical for support and internal-help agents, those requests go from 1–2 minutes to under a second. That also frees capacity and lowers cost for the rest.
+
+If you tell me which vector store you use and what kind of questions your agent handles, I can suggest a threshold strategy and skip rules for your case.
