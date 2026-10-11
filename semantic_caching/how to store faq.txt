@@ -1,0 +1,71 @@
+Yes, it’s a good idea, usually called a semantic cache. A cache hit returns in well under a second instead of running the full multi-step agent. It only pays off when three things are true:
+
+Many users ask similar questions.
+The answers don’t depend on the specific user (their account, files, history).
+The answers don’t go stale quickly. For live data like prices, stock, or weather, cache the plan instead of the answer (see the end).
+How it works
+A question comes in, and you embed it.
+You search the vector store for the closest past question.
+If the similarity is above a threshold, you return the stored answer. That’s a hit.
+If not, you run the agent, then store the question and answer pair for next time.
+Implementation as a LangGraph entry node
+python
+from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma   # or PGVector, Redis, FAISS
+from langchain_core.messages import AIMessage
+import time
+
+emb = OpenAIEmbeddings(model="text-embedding-3-small")  # small = fast
+faq = Chroma(collection_name="faq_cache", embedding_function=emb,
+             persist_directory="./faq_db")
+
+THRESHOLD = 0.92       # tune this (see below)
+TTL = 7 * 24 * 3600    # 1 week
+
+def check_cache(state):
+    q = state["messages"][-1].content
+    hits = faq.similarity_search_with_relevance_scores(q, k=1)
+    if hits:
+        doc, score = hits[0]
+        fresh = time.time() - doc.metadata["ts"] < TTL
+        if score >= THRESHOLD and fresh:
+            return {"messages": [AIMessage(doc.metadata["answer"])],
+                    "cache_hit": True}
+    return {"cache_hit": False}
+
+def store_answer(state):
+    q = state["messages"][0].content
+    a = state["messages"][-1].content
+    faq.add_texts([q], metadatas=[{"answer": a, "ts": time.time()}])
+    return {}
+
+Wire it into the graph:
+
+python
+builder.add_node("check_cache", check_cache)
+builder.add_node("store_answer", store_answer)
+builder.add_edge(START, "check_cache")
+builder.add_conditional_edges(
+    "check_cache",
+    lambda s: END if s["cache_hit"] else "agent",
+)
+# ...your agent subgraph...
+builder.add_edge("agent", "store_answer")
+builder.add_edge("store_answer", END)
+
+Embed only the question and keep the answer in metadata. Matching question to question is far more accurate than matching question to answer.
+
+Things that matter in practice
+Tune the threshold carefully. Too low gives wrong answers (“How do I cancel my order” can match “How do I place an order”). Start high, around 0.92–0.95, log near-misses, and lower it slowly while checking them by hand.
+Only store good answers. Skip storing when the agent errored, timed out, or said “I don’t know.” Better yet, store only answers the user rated positively.
+Invalidate the cache. Use a TTL, and clear the relevant entries when your source data or docs change. Add metadata like source_version so you can delete by filter.
+Scope personal data. If answers vary per user or tenant, add user_id or tenant_id to the metadata and filter on it, so you never leak one user’s answer to another.
+Normalize the question before embedding: lowercase it and strip greetings like “hi, can you tell me…”. This raises the hit rate.
+Consider a curated FAQ layer. Hand-write or approve the answers for your top 50–100 questions and check them first. Then use the auto-learned cache as a second tier.
+Ready-made option
+
+LangChain has RedisSemanticCache, which does the same thing at the LLM-call level with one line (set_llm_cache(...)). The custom node above is usually better for agents, though. It skips the entire multi-step run, not just one LLM call, and gives you control over TTL, filtering, and what gets stored.
+
+Variant for live data: cache the plan
+
+When answers change but the steps to get them don’t, store the planner’s output instead of the answer. On a hit, you skip the slow planning call and only execute the tools. That often saves 20–40% of the runtime even when you can’t reuse the answer itself.
